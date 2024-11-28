@@ -81,21 +81,21 @@ class Proposer:
 
 class Acceptor:
     def __init__(self) -> None:
-        self._highest_n = 0
+        self._highest_promise = 0
         self._last_proposal: Proposal | None = None
 
     def receive_prepare(self, number: int) -> PrepareResponse:
         print(f"received proposal with number {number}")
-        if number > self._highest_n:
+        if number > self._highest_promise:
+            self._highest_promise = number
             return PrepareResponse(True, self._last_proposal)
 
         return PrepareResponse(False, None)
 
     def receive_accept(self, prop: Proposal) -> AcceptResponse:
-        if prop.number <= self._highest_n:
+        if prop.number < self._highest_promise:
             return AcceptResponse(False)
 
-        self._highest_n = prop.number
         self._last_proposal = prop
         print(f"accepted proposal {prop}")
         return AcceptResponse(True)
@@ -120,22 +120,16 @@ class ImperfectAcceptorComms:
         await asyncio.sleep(latency / 2)
 
         fail = random.random()
-        if fail < 0.1:
+        if fail < 0.5:
             return AcceptResponse(False)
 
         return self.acc.receive_accept(prop)
 
 
-class Learner:
-    pass
-
-
 async def main():
     prop = Proposer([ImperfectAcceptorComms(Acceptor()) for _ in range(3)])
-    await prop.propose("foo")
-    await prop.propose("bar")
-    await prop.propose("ping")
-    await prop.propose("pong")
+    value = await prop.propose("foo")
+    print(value)
 
 
 if __name__ == "__main__":
