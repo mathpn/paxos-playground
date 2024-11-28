@@ -3,10 +3,12 @@ import asyncio
 
 from typing import Protocol, NamedTuple
 
+Value = str
+
 
 class Proposal(NamedTuple):
     number: int
-    value: str
+    value: Value
 
 
 class PrepareResponse(NamedTuple):
