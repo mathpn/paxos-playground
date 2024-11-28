@@ -36,9 +36,21 @@ class Proposer:
         self._majority = len(acceptor_comms) // 2 + 1
 
     async def propose(self, value):
+        while True:
+            accepted, value = await self._propose(value)
+            if accepted:
+                return value
+
+            await asyncio.sleep(0.1)
+
+    async def _propose(self, value) -> tuple[bool, Value | None]:
         self._n += 1
-        await self._prepare()
-        await self._request_acceptance(value)
+        prepared, prop = await self._prepare()
+        if not prepared:
+            return False, None
+
+        value = value if prop is None else prop.value
+        return await self._request_acceptance(value), value
 
     async def _prepare(self) -> tuple[bool, Proposal | None]:
         responses = await asyncio.gather(
@@ -64,7 +76,7 @@ class Proposer:
             *[comm.accept(prop) for comm in self._acceptor_comms]
         )
         accepted = [r for r in responses if r.accepted]
-        # TODO continue
+        return len(accepted) >= self._majority
 
 
 class Acceptor:
