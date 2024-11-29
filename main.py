@@ -30,21 +30,21 @@ class AcceptorCommunication(Protocol):
 class Proposer:
     def __init__(
         self,
-        acceptor_comms: list[AcceptorCommunication],
+        acceptor_comms: Sequence[AcceptorCommunication],
     ) -> None:
         self._n = 0
         self._acceptor_comms = acceptor_comms
         self._majority = len(acceptor_comms) // 2 + 1
 
-    async def propose(self, value):
+    async def propose(self, value: Value):
         while True:
-            accepted, value = await self._propose(value)
+            accepted, acc_value = await self._propose(value)
             if accepted:
-                return value
+                return acc_value
 
             await asyncio.sleep(0.1)
 
-    async def _propose(self, value) -> tuple[bool, Value | None]:
+    async def _propose(self, value: Value) -> tuple[bool, Value | None]:
         self._n += 1
         prepared, prop = await self._prepare()
         if not prepared:
@@ -54,6 +54,7 @@ class Proposer:
         return await self._request_acceptance(value), value
 
     async def _prepare(self) -> tuple[bool, Proposal | None]:
+        print(f"requesting prepare for number {self._n}")
         responses = await asyncio.gather(
             *[comm.prepare(self._n) for comm in self._acceptor_comms]
         )
@@ -73,6 +74,7 @@ class Proposer:
 
     async def _request_acceptance(self, value: Value):
         prop = Proposal(number=self._n, value=value)
+        print(f"requesting acceptance for proposal {prop}")
         responses = await asyncio.gather(
             *[comm.accept(prop) for comm in self._acceptor_comms]
         )
@@ -86,8 +88,9 @@ class Acceptor:
         self._last_proposal: Proposal | None = None
 
     def receive_prepare(self, number: int) -> PrepareResponse:
-        print(f"received proposal with number {number}")
+        print(f"received prepare request for number {number}")
         if number > self._highest_promise:
+            print(f"promised to number {number}")
             self._highest_promise = number
             return PrepareResponse(prepared=True, last_proposal=self._last_proposal)
 
@@ -103,15 +106,15 @@ class Acceptor:
 
 
 class ImperfectAcceptorComms:
-    def __init__(self, acceptor: Acceptor) -> None:
+    def __init__(self, acceptor: Acceptor, failure_rate: float = 0.5) -> None:
         self.acc = acceptor
+        self.failure_rate = failure_rate
 
     async def prepare(self, number: int) -> PrepareResponse:
         latency = random.random()
         await asyncio.sleep(latency / 2)
 
-        fail = random.random()
-        if fail < 0.1:
+        if random.random() < self.failure_rate:
             return PrepareResponse(prepared=False)
 
         return self.acc.receive_prepare(number)
@@ -120,8 +123,7 @@ class ImperfectAcceptorComms:
         latency = random.random()
         await asyncio.sleep(latency / 2)
 
-        fail = random.random()
-        if fail < 0.5:
+        if random.random() < self.failure_rate:
             return AcceptResponse(accepted=False)
 
         return self.acc.receive_accept(prop)
