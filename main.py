@@ -1,22 +1,23 @@
-import random
 import asyncio
+import random
+from typing import Protocol, Sequence
 
-from typing import Protocol, NamedTuple
+from pydantic import BaseModel
 
 Value = str
 
 
-class Proposal(NamedTuple):
+class Proposal(BaseModel):
     number: int
     value: Value
 
 
-class PrepareResponse(NamedTuple):
+class PrepareResponse(BaseModel):
     prepared: bool
-    last_proposal: Proposal | None
+    last_proposal: Proposal | None = None
 
 
-class AcceptResponse(NamedTuple):
+class AcceptResponse(BaseModel):
     accepted: bool
 
 
@@ -70,8 +71,8 @@ class Proposer:
 
         return True, highest_proposal
 
-    async def _request_acceptance(self, value):
-        prop = Proposal(self._n, value)
+    async def _request_acceptance(self, value: Value):
+        prop = Proposal(number=self._n, value=value)
         responses = await asyncio.gather(
             *[comm.accept(prop) for comm in self._acceptor_comms]
         )
@@ -88,17 +89,17 @@ class Acceptor:
         print(f"received proposal with number {number}")
         if number > self._highest_promise:
             self._highest_promise = number
-            return PrepareResponse(True, self._last_proposal)
+            return PrepareResponse(prepared=True, last_proposal=self._last_proposal)
 
-        return PrepareResponse(False, None)
+        return PrepareResponse(prepared=False)
 
     def receive_accept(self, prop: Proposal) -> AcceptResponse:
         if prop.number < self._highest_promise:
-            return AcceptResponse(False)
+            return AcceptResponse(accepted=False)
 
         self._last_proposal = prop
         print(f"accepted proposal {prop}")
-        return AcceptResponse(True)
+        return AcceptResponse(accepted=True)
 
 
 class ImperfectAcceptorComms:
@@ -111,7 +112,7 @@ class ImperfectAcceptorComms:
 
         fail = random.random()
         if fail < 0.1:
-            return PrepareResponse(False, None)
+            return PrepareResponse(prepared=False)
 
         return self.acc.receive_prepare(number)
 
@@ -121,7 +122,7 @@ class ImperfectAcceptorComms:
 
         fail = random.random()
         if fail < 0.5:
-            return AcceptResponse(False)
+            return AcceptResponse(accepted=False)
 
         return self.acc.receive_accept(prop)
 
