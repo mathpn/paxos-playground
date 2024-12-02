@@ -122,7 +122,6 @@ class RESTLearnerComms:
                 )
 
             except asyncio.TimeoutError:
-                print("oh no, I failed")
                 pass
 
         return
@@ -169,7 +168,7 @@ def reset_paxos(app: FastAPI):
     instance_id = int(os.environ["INSTANCE_ID"])
     n_instances = int(os.environ["N_INSTANCES"])
     app.state.tasks = set()
-    app.state.learner = Learner(n_instances)
+    app.state.learner = Learner(instance_id, n_instances)
     app.state.acceptor = Acceptor(
         acceptor_id=instance_id,
         learner_comms=[

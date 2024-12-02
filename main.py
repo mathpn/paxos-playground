@@ -100,7 +100,9 @@ class Proposer:
         return accepted, value
 
     async def _prepare(self) -> tuple[bool, Proposal | None]:
-        print(f"requesting prepare for number {self._proposal_number()}")
+        print(
+            f"[prop {self._id}] requesting prepare for number {self._proposal_number()}"
+        )
         responses = await asyncio.gather(
             *[comm.prepare(self._proposal_number()) for comm in self._acceptor_comms]
         )
@@ -120,7 +122,7 @@ class Proposer:
 
     async def _request_acceptance(self, value: Value):
         prop = Proposal(number=self._proposal_number(), value=value)
-        print(f"requesting acceptance for proposal {prop}")
+        print(f"[prop {self._id}] requesting acceptance for proposal {prop}")
         responses = await asyncio.gather(
             *[comm.accept(prop) for comm in self._acceptor_comms]
         )
@@ -162,11 +164,11 @@ class Acceptor:
         persist(self._persist_id, state)
 
     def receive_prepare(self, number: int) -> PrepareResponse:
-        print(f"received prepare request for number {number}")
+        print(f"[acc {self._id}] received prepare request for number {number}")
         if number > self._highest_promise and (
             self._last_proposal is None or number != self._last_proposal.number
         ):
-            print(f"promised to number {number}")
+            print(f"[acc {self._id}] promised to number {number}")
             self._highest_promise = number
             self._persist()
             return PrepareResponse(prepared=True, last_proposal=self._last_proposal)
@@ -179,7 +181,7 @@ class Acceptor:
 
         self._last_proposal = prop
         self._persist()
-        print(f"accepted proposal {prop}")
+        print(f"[acc {self._id}] accepted proposal {prop}")
 
         await asyncio.gather(
             *[comm.send_accepted(self._id, prop.value) for comm in self._learner_comms]
@@ -189,16 +191,20 @@ class Acceptor:
 
 
 class Learner:
-    def __init__(self, n_acceptors: int) -> None:
+    def __init__(self, learner_id: int, n_acceptors: int) -> None:
+        self._id = learner_id
         self._accepted: defaultdict[Value, set[int]] = defaultdict(set)
         self._n_acceptors = n_acceptors
         self._majority = n_acceptors // 2 + 1
 
     def receive_accepted(self, acceptor_id: int, value: Value) -> None:
-        print(f"received accepted value {value} from {acceptor_id}")
+        print(
+            f"[learner {self._id}] received accepted value {value} from {acceptor_id}"
+        )
         self._accepted[value].add(acceptor_id)
 
     def get_value(self) -> Value | None:
+        print(f"[learner {self._id}] finding accepted value")
         if not self._accepted:
             return None
 
@@ -212,7 +218,7 @@ class Learner:
 
 
 class ImperfectAcceptorComms:
-    def __init__(self, acceptor: Acceptor, failure_rate: float = 0.5) -> None:
+    def __init__(self, acceptor: Acceptor, failure_rate: float = 0.2) -> None:
         self.acc = acceptor
         self.failure_rate = failure_rate
 
@@ -236,7 +242,7 @@ class ImperfectAcceptorComms:
 
 
 class ImperfectLearnerComms:
-    def __init__(self, learner: Learner, failure_rate: float = 0.5) -> None:
+    def __init__(self, learner: Learner, failure_rate: float = 0.2) -> None:
         self.learner = learner
         self.failure_rate = failure_rate
 
@@ -251,7 +257,7 @@ class ImperfectLearnerComms:
 
 
 async def main():
-    learners = [Learner(3) for _ in range(3)]
+    learners = [Learner(i, 3) for i in range(3)]
     learner_comms = [ImperfectLearnerComms(learner) for learner in learners]
     acceptors = [Acceptor(i, learner_comms=learner_comms) for i in range(3)]
     prop = Proposer(
@@ -261,13 +267,14 @@ async def main():
     )
 
     while True:
-        accepted, acc_value = await prop.propose("foo")
+        accepted, _ = await prop.propose("foo")
         if accepted:
             break
 
         await asyncio.sleep(0.1)
 
-    print(learners[0].get_value())
+    for learner in learners:
+        print(f"learner {learner._id}: {learner.get_value()}")
 
 
 if __name__ == "__main__":
