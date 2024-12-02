@@ -106,10 +106,12 @@ def reset_paxos(app: FastAPI):
     app.state.tasks = set()
     app.state.acceptor = Acceptor()
     app.state.proposer = Proposer(
-        [
+        proposer_id=int(os.environ["PROPOSER_ID"]),
+        n_proposers=int(os.environ["N_PROPOSERS"]),
+        acceptor_comms=[
             ImperfectNetworkAdapter(WebAPIAdapter(address), app.state.tasks)
             for address in service_addresses
-        ]
+        ],
     )
 
 

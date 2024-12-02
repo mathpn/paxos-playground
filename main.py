@@ -30,11 +30,18 @@ class AcceptorCommunication(Protocol):
 class Proposer:
     def __init__(
         self,
+        proposer_id: int,
+        n_proposers: int,
         acceptor_comms: Sequence[AcceptorCommunication],
     ) -> None:
         self._n = 0
+        self._id = proposer_id
+        self._n_proposers = n_proposers
         self._acceptor_comms = acceptor_comms
         self._majority = len(acceptor_comms) // 2 + 1
+
+    def _proposal_number(self):
+        return self._id + self._n * self._n_proposers
 
     async def propose(self, value: Value):
         while True:
@@ -51,12 +58,13 @@ class Proposer:
             return False, None
 
         value = value if prop is None else prop.value
-        return await self._request_acceptance(value), value
+        accepted = await self._request_acceptance(value)
+        return accepted, value
 
     async def _prepare(self) -> tuple[bool, Proposal | None]:
-        print(f"requesting prepare for number {self._n}")
+        print(f"requesting prepare for number {self._proposal_number()}")
         responses = await asyncio.gather(
-            *[comm.prepare(self._n) for comm in self._acceptor_comms]
+            *[comm.prepare(self._proposal_number()) for comm in self._acceptor_comms]
         )
         prepared_res = [r for r in responses if r.prepared]
 
@@ -73,7 +81,7 @@ class Proposer:
         return True, highest_proposal
 
     async def _request_acceptance(self, value: Value):
-        prop = Proposal(number=self._n, value=value)
+        prop = Proposal(number=self._proposal_number(), value=value)
         print(f"requesting acceptance for proposal {prop}")
         responses = await asyncio.gather(
             *[comm.accept(prop) for comm in self._acceptor_comms]
@@ -130,7 +138,11 @@ class ImperfectAcceptorComms:
 
 
 async def main():
-    prop = Proposer([ImperfectAcceptorComms(Acceptor()) for _ in range(3)])
+    prop = Proposer(
+        proposer_id=0,
+        n_proposers=3,
+        acceptor_comms=[ImperfectAcceptorComms(Acceptor()) for _ in range(3)],
+    )
     value = await prop.propose("foo")
     print(value)
 
