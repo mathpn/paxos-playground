@@ -1,4 +1,5 @@
 import asyncio
+from collections import defaultdict
 import json
 import os
 import random
@@ -29,6 +30,10 @@ class AcceptorCommunication(Protocol):
     async def prepare(self, number: int) -> PrepareResponse: ...
 
     async def accept(self, prop: Proposal) -> AcceptResponse: ...
+
+
+class LearnerCommunication(Protocol):
+    async def send_accepted(self, acceptor_id: int, value: Value) -> None: ...
 
 
 def persist(id_: str, d):
@@ -134,19 +139,23 @@ class Proposer:
 class Acceptor:
     _persisted = {"_highest_promise", "_last_proposal"}
 
-    def __init__(self, acceptor_id: int) -> None:
+    def __init__(
+        self, acceptor_id: int, learner_comms: Sequence[LearnerCommunication]
+    ) -> None:
         self._highest_promise = 0
         self._last_proposal: Proposal | None = None
         self._id = acceptor_id
+        self._learner_comms = learner_comms
         self._persist_id = f"acc_{self._id}"
         self._load()
 
     def _load(self):
         previous_state = load(self._persist_id)
         if previous_state:
-            previous_state["_last_proposal"] = Proposal.model_validate(
-                previous_state["_last_proposal"]
-            )
+            if previous_state["_last_proposal"] is not None:
+                previous_state["_last_proposal"] = Proposal.model_validate(
+                    previous_state["_last_proposal"]
+                )
             self.__dict__ = {**self.__dict__, **previous_state}
 
     def _persist(self):
@@ -172,14 +181,42 @@ class Acceptor:
 
         return PrepareResponse(prepared=False)
 
-    def receive_accept(self, prop: Proposal) -> AcceptResponse:
+    async def receive_accept(self, prop: Proposal) -> AcceptResponse:
         if prop.number < self._highest_promise:
             return AcceptResponse(accepted=False)
 
         self._last_proposal = prop
         self._persist()
         print(f"accepted proposal {prop}")
+
+        await asyncio.gather(
+            *[comm.send_accepted(self._id, prop.value) for comm in self._learner_comms]
+        )
+
         return AcceptResponse(accepted=True)
+
+
+class Learner:
+    def __init__(self, n_acceptors: int) -> None:
+        self._accepted: defaultdict[Value, set[int]] = defaultdict(set)
+        self._n_acceptors = n_acceptors
+        self._majority = n_acceptors // 2 + 1
+
+    def receive_accepted(self, acceptor_id: int, value: Value) -> None:
+        print(f"received accepted value {value} from {acceptor_id}")
+        self._accepted[value].add(acceptor_id)
+
+    def get_value(self) -> Value | None:
+        if not self._accepted:
+            return None
+
+        items = ((k, len(v)) for k, v in self._accepted.items())
+        sorted_items = list(sorted(items, key=lambda item: item[1], reverse=True))
+        value, count = sorted_items[0]
+        if count >= self._majority:
+            return value
+
+        return None
 
 
 class ImperfectAcceptorComms:
@@ -203,17 +240,35 @@ class ImperfectAcceptorComms:
         if random.random() < self.failure_rate:
             return AcceptResponse(accepted=False)
 
-        return self.acc.receive_accept(prop)
+        return await self.acc.receive_accept(prop)
+
+
+class ImperfectLearnerComms:
+    def __init__(self, learner: Learner, failure_rate: float = 0.5) -> None:
+        self.learner = learner
+        self.failure_rate = failure_rate
+
+    async def send_accepted(self, acceptor_id: int, value: Value):
+        latency = random.random()
+        await asyncio.sleep(latency / 2)
+
+        if random.random() < self.failure_rate:
+            return
+
+        self.learner.receive_accepted(acceptor_id, value)
 
 
 async def main():
+    learners = [Learner(3) for _ in range(3)]
+    learner_comms = [ImperfectLearnerComms(learner) for learner in learners]
+    acceptors = [Acceptor(i, learner_comms=learner_comms) for i in range(3)]
     prop = Proposer(
         proposer_id=0,
         n_proposers=3,
-        acceptor_comms=[ImperfectAcceptorComms(Acceptor(i)) for i in range(3)],
+        acceptor_comms=[ImperfectAcceptorComms(acc) for acc in acceptors],
     )
-    value = await prop.propose("foo")
-    print(value)
+    await prop.propose("foo")
+    print(learners[0].get_value())
 
 
 if __name__ == "__main__":

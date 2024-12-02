@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from main import (
     Acceptor,
     AcceptResponse,
+    Learner,
     PrepareResponse,
     Proposal,
     Proposer,
@@ -17,50 +18,54 @@ from main import (
 )
 
 
-class WebAPIAdapter:
+class RESTAcceptorComms:
     def __init__(self, acceptor_address: str, timeout: float = 1) -> None:
         self._acceptor_address = acceptor_address
         self._timeout = aiohttp.ClientTimeout(total=timeout)
 
     async def prepare(self, number: int) -> PrepareResponse:
         async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{self._acceptor_address}/prepare",
-                params={"number": number},
-                timeout=self._timeout,
-            ) as res:
-                if res.status != 200:
-                    return PrepareResponse(prepared=False)
+            try:
+                async with session.post(
+                    f"{self._acceptor_address}/prepare",
+                    params={"number": number},
+                    timeout=self._timeout,
+                ) as res:
+                    if res.status != 200:
+                        return PrepareResponse(prepared=False)
 
-                return PrepareResponse.model_validate(await res.json())
+                    return PrepareResponse.model_validate(await res.json())
+
+            except asyncio.TimeoutError:
+                return PrepareResponse(prepared=False)
 
     async def accept(self, prop: Proposal) -> AcceptResponse:
         async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{self._acceptor_address}/accept",
-                json=prop.model_dump(),
-                timeout=self._timeout,
-            ) as res:
-                if res.status != 200:
-                    return AcceptResponse(accepted=False)
+            try:
+                async with session.post(
+                    f"{self._acceptor_address}/accept",
+                    json=prop.model_dump(),
+                    timeout=self._timeout,
+                ) as res:
+                    if res.status != 200:
+                        return AcceptResponse(accepted=False)
 
-                return AcceptResponse.model_validate(await res.json())
+                    return AcceptResponse.model_validate(await res.json())
+
+            except asyncio.TimeoutError:
+                return AcceptResponse(accepted=False)
 
 
-class ImperfectNetworkAdapter:
+class ImperfectAcceptorComms:
     def __init__(
         self,
-        web_api_adapter: WebAPIAdapter,
+        web_api_adapter: RESTAcceptorComms,
         tasks: set[asyncio.Task],
         failure_rate: float = 0.3,
     ) -> None:
         self._adapter = web_api_adapter
         self.failure_rate = failure_rate
         self.tasks = tasks
-
-    async def gather_tasks(self):
-        print(self.tasks)
-        await asyncio.gather(*self.tasks)
 
     async def _delayed_call(self, callback, *args, **kwargs):
         lat = random.random()
@@ -100,17 +105,81 @@ class ImperfectNetworkAdapter:
         return await task
 
 
+class RESTLearnerComms:
+    def __init__(self, learner_address: str, timeout: float = 1) -> None:
+        self._learner_address = learner_address
+        self._timeout = aiohttp.ClientTimeout(total=timeout)
+
+    async def send_accepted(self, acceptor_id: int, value: Value) -> None:
+        async with aiohttp.ClientSession() as session:
+            try:
+                await session.post(
+                    f"{self._learner_address}/receive_accepted",
+                    params={"acceptor_id": acceptor_id, "value": value},
+                    timeout=self._timeout,
+                )
+
+            except asyncio.TimeoutError:
+                print("oh no, I failed")
+                pass
+
+        return
+
+
+class ImperfectLearnerComms:
+    def __init__(
+        self,
+        rest_adapter: RESTLearnerComms,
+        tasks: set[asyncio.Task],
+        failure_rate: float = 0.3,
+    ) -> None:
+        self._adapter = rest_adapter
+        self.failure_rate = failure_rate
+        self.tasks = tasks
+
+    async def _delayed_call(self, callback, *args, **kwargs):
+        lat = random.random()
+        await asyncio.sleep(lat)
+        return await callback(*args, **kwargs)
+
+    async def send_accepted(self, acceptor_id: int, value: Value) -> None:
+        lat = random.random()
+        await asyncio.sleep(lat)
+
+        if random.random() < self.failure_rate:
+            return
+
+        task = asyncio.create_task(
+            self._delayed_call(self._adapter.send_accepted, acceptor_id, value)
+        )
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+        if random.random() < self.failure_rate:
+            return
+
+        await task
+
+
 def reset_paxos(app: FastAPI):
     service_addresses = os.getenv("SERVICE_ADDRESSES", "").split(";")
 
     instance_id = int(os.environ["INSTANCE_ID"])
+    n_instances = int(os.environ["N_INSTANCES"])
     app.state.tasks = set()
-    app.state.acceptor = Acceptor(instance_id)
+    app.state.learner = Learner(n_instances)
+    app.state.acceptor = Acceptor(
+        acceptor_id=instance_id,
+        learner_comms=[
+            ImperfectLearnerComms(RESTLearnerComms(address), app.state.tasks)
+            for address in service_addresses
+        ],
+    )
     app.state.proposer = Proposer(
         proposer_id=instance_id,
-        n_proposers=int(os.environ["N_PROPOSERS"]),
+        n_proposers=n_instances,
         acceptor_comms=[
-            ImperfectNetworkAdapter(WebAPIAdapter(address), app.state.tasks)
+            ImperfectAcceptorComms(RESTAcceptorComms(address), app.state.tasks)
             for address in service_addresses
         ],
     )
@@ -133,11 +202,21 @@ async def propose(value: Value):
     return accepted_value
 
 
+@app.get("/accepted_value")
+def get_accepted_value():
+    return app.state.learner.get_value()
+
+
+@app.post("/receive_accepted")
+def receive_accepted(acceptor_id: int, value: Value):
+    return app.state.learner.receive_accepted(acceptor_id, value)
+
+
 @app.post("/prepare")
 def prepare(number: int):
     return app.state.acceptor.receive_prepare(number)
 
 
 @app.post("/accept")
-def accept(prop: Proposal):
-    return app.state.acceptor.receive_accept(prop)
+async def accept(prop: Proposal):
+    return await app.state.acceptor.receive_accept(prop)
