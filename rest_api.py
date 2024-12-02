@@ -17,9 +17,11 @@ from main import (
     Value,
 )
 
+FAILURE_RATE = 0.1
+
 
 class RESTAcceptorComms:
-    def __init__(self, acceptor_address: str, timeout: float = 1) -> None:
+    def __init__(self, acceptor_address: str, timeout: float = 3) -> None:
         self._acceptor_address = acceptor_address
         self._timeout = aiohttp.ClientTimeout(total=timeout)
 
@@ -61,7 +63,7 @@ class ImperfectAcceptorComms:
         self,
         web_api_adapter: RESTAcceptorComms,
         tasks: set[asyncio.Task],
-        failure_rate: float = 0.3,
+        failure_rate: float = FAILURE_RATE,
     ) -> None:
         self._adapter = web_api_adapter
         self.failure_rate = failure_rate
@@ -131,7 +133,7 @@ class ImperfectLearnerComms:
         self,
         rest_adapter: RESTLearnerComms,
         tasks: set[asyncio.Task],
-        failure_rate: float = 0.3,
+        failure_rate: float = FAILURE_RATE,
     ) -> None:
         self._adapter = rest_adapter
         self.failure_rate = failure_rate
