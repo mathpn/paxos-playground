@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 import aiohttp
 from fastapi import FastAPI
 
-from main import (
+from paxos import (
     Acceptor,
     AcceptResponse,
     Learner,
