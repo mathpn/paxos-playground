@@ -198,8 +198,12 @@ app = FastAPI(lifespan=lifespan)
 
 @app.post("/propose")
 async def propose(value: Value):
-    accepted_value = await app.state.proposer.propose(value)
-    return accepted_value
+    while True:
+        accepted, accepted_value = await app.state.proposer.propose(value)
+        if accepted:
+            return accepted_value
+
+        await asyncio.sleep(0.1)
 
 
 @app.get("/accepted_value")

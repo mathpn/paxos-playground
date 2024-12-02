@@ -89,15 +89,7 @@ class Proposer:
     def _proposal_number(self):
         return self._id + self._n * self._n_proposers
 
-    async def propose(self, value: Value):
-        while True:
-            accepted, acc_value = await self._propose(value)
-            if accepted:
-                return acc_value
-
-            await asyncio.sleep(0.1)
-
-    async def _propose(self, value: Value) -> tuple[bool, Value | None]:
+    async def propose(self, value: Value) -> tuple[bool, Value | None]:
         self._increment()
         prepared, prop = await self._prepare()
         if not prepared:
@@ -267,7 +259,14 @@ async def main():
         n_proposers=3,
         acceptor_comms=[ImperfectAcceptorComms(acc) for acc in acceptors],
     )
-    await prop.propose("foo")
+
+    while True:
+        accepted, acc_value = await prop.propose("foo")
+        if accepted:
+            break
+
+        await asyncio.sleep(0.1)
+
     print(learners[0].get_value())
 
 
