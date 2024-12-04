@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 import random
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Any, Protocol, Sequence
 
 from pydantic import BaseModel
@@ -45,6 +45,7 @@ def persist(id_: str, d: dict[str, Any]):
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp_fpath, fpath)
+    # TODO fsync no diretorio
 
 
 def load(id_: str) -> dict | None:
@@ -220,64 +221,125 @@ class Learner:
 
 
 class ImperfectAcceptorComms:
-    def __init__(self, acceptor: Acceptor, failure_rate: float = 0.2) -> None:
+    def __init__(
+        self,
+        acceptor: Acceptor,
+        accepted_values: dict[int, Value],
+        task_queue: asyncio.Queue,
+        failure_rate: float = 0.2,
+    ) -> None:
         self.acc = acceptor
+        self.accepted_values = accepted_values
         self.failure_rate = failure_rate
+        self.task_queue = task_queue
 
     async def prepare(self, number: int) -> PrepareResponse:
-        latency = random.random()
-        await asyncio.sleep(latency / 2)
+        async def prepare_task():
+            return self.acc.receive_prepare(number)
 
-        if random.random() < self.failure_rate:
-            return PrepareResponse(prepared=False)
+        fut = asyncio.get_event_loop().create_future()
+        await self.task_queue.put((False, prepare_task(), fut))
 
-        return self.acc.receive_prepare(number)
+        return await fut
 
     async def accept(self, prop: Proposal) -> AcceptResponse:
-        latency = random.random()
-        await asyncio.sleep(latency / 2)
+        async def accept_task():
+            accepted = await self.acc.receive_accept(prop)
+            if accepted:
+                self.accepted_values[self.acc._id] = prop.value
+            return accepted
 
-        if random.random() < self.failure_rate:
-            return AcceptResponse(accepted=False)
+        fut = asyncio.get_event_loop().create_future()
+        await self.task_queue.put((False, accept_task(), fut))
 
-        return await self.acc.receive_accept(prop)
+        return await fut
 
 
 class ImperfectLearnerComms:
-    def __init__(self, learner: Learner, failure_rate: float = 0.2) -> None:
+    def __init__(self, learner: Learner, task_queue: asyncio.Queue) -> None:
         self.learner = learner
-        self.failure_rate = failure_rate
+        self.task_queue = task_queue
 
     async def send_accepted(self, acceptor_id: int, value: Value):
-        latency = random.random()
-        await asyncio.sleep(latency / 2)
+        async def send_accepted_task():
+            self.learner.receive_accepted(acceptor_id, value)
 
-        if random.random() < self.failure_rate:
-            return
+        fut = asyncio.get_event_loop().create_future()
+        await self.task_queue.put((False, send_accepted_task(), fut))
 
-        self.learner.receive_accepted(acceptor_id, value)
+        return await fut
+
+
+async def await_coro(coro, fut):
+    result = await coro
+    fut.set_result(result)
+
+
+def get_consensus(accepted_values: dict[int, Value], majority: int) -> Value | None:
+    counts = Counter(accepted_values.values())
+    majority_values = [k for k, v in counts.items() if v >= majority]
+    return majority_values[0] if majority_values else None
+
+
+async def process_task_queue(
+    task_queue: asyncio.Queue, accepted_values: dict[int, Value], majority: int
+):
+    tasks = set()
+    consensus = None
+
+    while True:
+        new_consensus = get_consensus(accepted_values, majority)
+        if consensus is not None:
+            assert consensus == new_consensus, "consensus changed"
+
+        consensus = new_consensus
+        try:
+            proposer, coro, fut = task_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            await asyncio.sleep(1e-4)
+            continue
+
+        try:
+            if proposer:
+                bg_task = asyncio.create_task(await_coro(coro, fut))
+                tasks.add(bg_task)
+                bg_task.add_done_callback(tasks.discard)
+            else:
+                await await_coro(coro, fut)
+
+        except Exception as e:
+            fut.set_exception(e)
+        finally:
+            task_queue.task_done()
 
 
 async def main():
-    learners = [Learner(i, 3) for i in range(3)]
-    learner_comms = [ImperfectLearnerComms(learner) for learner in learners]
-    acceptors = [Acceptor(i, learner_comms=learner_comms) for i in range(3)]
-    prop = Proposer(
-        proposer_id=0,
-        n_proposers=3,
-        acceptor_comms=[ImperfectAcceptorComms(acc) for acc in acceptors],
+    n_nodes = 3
+    majority = n_nodes // 2 + 1
+    accepted_values = {}
+    task_queue = asyncio.Queue()
+
+    learners = [Learner(i, n_nodes) for i in range(n_nodes)]
+    learner_comms = [ImperfectLearnerComms(learner, task_queue) for learner in learners]
+    acceptors = [Acceptor(i, learner_comms=learner_comms) for i in range(n_nodes)]
+    acceptor_comms = [
+        ImperfectAcceptorComms(acc, accepted_values, task_queue) for acc in acceptors
+    ]
+    proposers = [Proposer(i, n_nodes, acceptor_comms) for i in range(n_nodes)]
+
+    consumer_task = asyncio.create_task(
+        process_task_queue(task_queue, accepted_values, majority)
     )
 
-    while True:
-        accepted, _ = await prop.propose("foo")
-        if accepted:
-            break
+    fut = asyncio.get_event_loop().create_future()
+    await task_queue.put((True, proposers[0].propose("foo"), fut))
+    fut = asyncio.get_event_loop().create_future()
+    await task_queue.put((True, proposers[1].propose("bar"), fut))
+    fut = asyncio.get_event_loop().create_future()
+    await task_queue.put((True, proposers[2].propose("ping"), fut))
 
-        await asyncio.sleep(0.1)
-
-    await asyncio.sleep(2)
-    for learner in learners:
-        print(f"learner {learner._id}: {learner.get_value()}")
+    await consumer_task
+    print(accepted_values)
 
 
 if __name__ == "__main__":
