@@ -142,6 +142,7 @@ class Acceptor:
         self._learner_comms = learner_comms
         self._persist_id = f"acc_{self._id}"
         self._load()
+        self._tasks = set()
 
     def _load(self) -> None:
         previous_state = load(self._persist_id)
@@ -183,9 +184,10 @@ class Acceptor:
         self._persist()
         print(f"[acc {self._id}] accepted proposal {prop}")
 
-        await asyncio.gather(
-            *[comm.send_accepted(self._id, prop.value) for comm in self._learner_comms]
-        )
+        for comm in self._learner_comms:
+            task = asyncio.create_task(comm.send_accepted(self._id, prop.value))
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
 
         return AcceptResponse(accepted=True)
 
