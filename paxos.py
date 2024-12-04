@@ -1,9 +1,9 @@
 import asyncio
-from collections import defaultdict
 import json
 import os
 import random
-from typing import Protocol, Sequence
+from collections import defaultdict
+from typing import Any, Protocol, Sequence
 
 from pydantic import BaseModel
 
@@ -36,7 +36,7 @@ class LearnerCommunication(Protocol):
     async def send_accepted(self, acceptor_id: int, value: Value) -> None: ...
 
 
-def persist(id_: str, d):
+def persist(id_: str, d: dict[str, Any]):
     os.makedirs(PERSIST_DIR, exist_ok=True)
     tmp_fpath = f"{PERSIST_DIR}/.tmp_{id_}.json"
     fpath = f"{PERSIST_DIR}/{id_}.json"
@@ -73,20 +73,20 @@ class Proposer:
         self._persist_id = f"prop_{self._id}"
         self._load()
 
-    def _load(self):
+    def _load(self) -> None:
         previous_state = load(self._persist_id)
         if previous_state:
             self.__dict__ = {**self.__dict__, **previous_state}
 
-    def _persist(self):
+    def _persist(self) -> None:
         state = {k: v for k, v in self.__dict__.items() if k in self._persisted}
         persist(self._persist_id, state)
 
-    def _increment(self):
+    def _increment(self) -> None:
         self._n += 1
         self._persist()
 
-    def _proposal_number(self):
+    def _proposal_number(self) -> int:
         return self._id + self._n * self._n_proposers
 
     async def propose(self, value: Value) -> tuple[bool, Value | None]:
@@ -120,7 +120,7 @@ class Proposer:
 
         return True, highest_proposal
 
-    async def _request_acceptance(self, value: Value):
+    async def _request_acceptance(self, value: Value) -> bool:
         prop = Proposal(number=self._proposal_number(), value=value)
         print(f"[prop {self._id}] requesting acceptance for proposal {prop}")
         responses = await asyncio.gather(
@@ -143,7 +143,7 @@ class Acceptor:
         self._persist_id = f"acc_{self._id}"
         self._load()
 
-    def _load(self):
+    def _load(self) -> None:
         previous_state = load(self._persist_id)
         if previous_state:
             if previous_state["_last_proposal"] is not None:
@@ -152,7 +152,7 @@ class Acceptor:
                 )
             self.__dict__ = {**self.__dict__, **previous_state}
 
-    def _persist(self):
+    def _persist(self) -> None:
         state = {}
         for k, v in self.__dict__.items():
             if k not in self._persisted:
@@ -273,6 +273,7 @@ async def main():
 
         await asyncio.sleep(0.1)
 
+    await asyncio.sleep(2)
     for learner in learners:
         print(f"learner {learner._id}: {learner.get_value()}")
 
