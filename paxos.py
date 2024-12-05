@@ -5,28 +5,30 @@ import multiprocessing
 import os
 import random
 from collections import Counter, defaultdict
+from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum, auto
 from typing import Any, Protocol, Sequence
 from uuid import uuid4
-
-from pydantic import BaseModel
 
 PERSIST_DIR = "/tmp/paxos-persist"
 
 Value = str
 
 
-class Proposal(BaseModel):
+@dataclass
+class Proposal:
     number: int
     value: Value
 
 
-class PrepareResponse(BaseModel):
+@dataclass
+class PrepareResponse:
     prepared: bool
     last_proposal: Proposal | None = None
 
 
-class AcceptResponse(BaseModel):
+@dataclass
+class AcceptResponse:
     accepted: bool
 
 
@@ -155,8 +157,8 @@ class Acceptor:
         previous_state = load(self._persist_id)
         if previous_state:
             if previous_state["_last_proposal"] is not None:
-                previous_state["_last_proposal"] = Proposal.model_validate(
-                    previous_state["_last_proposal"]
+                previous_state["_last_proposal"] = Proposal(
+                    **previous_state["_last_proposal"]
                 )
             self.__dict__ = {**self.__dict__, **previous_state}
 
@@ -165,8 +167,8 @@ class Acceptor:
         for k, v in self.__dict__.items():
             if k not in self._persisted:
                 continue
-            if isinstance(v, BaseModel):
-                v = v.model_dump()
+            if is_dataclass(v) and not isinstance(v, type):
+                v = asdict(v)
             state[k] = v
 
         persist(self._persist_id, state)
