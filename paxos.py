@@ -7,7 +7,7 @@ import random
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum, auto
-from typing import Any, Protocol, Sequence
+from typing import Any, Callable, NamedTuple, Protocol, Sequence
 from uuid import uuid4
 
 PERSIST_DIR = "/tmp/paxos-persist"
@@ -54,7 +54,6 @@ def persist(id_: str, d: dict[str, Any]):
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp_fpath, fpath)
-    # TODO fsync no diretorio
 
 
 def load(id_: str) -> dict | None:
@@ -83,6 +82,7 @@ class Proposer:
         self._majority = len(acceptor_comms) // 2 + 1
         self._persist_id = f"prop_{instance_id}_{self._id}"
         self._load()
+        self._persist()
 
     def _load(self) -> None:
         previous_state = load(self._persist_id)
@@ -154,6 +154,7 @@ class Acceptor:
         self._learner_comms = learner_comms
         self._persist_id = f"acc_{instance_id}_{self._id}"
         self._load()
+        self._persist()
         self._tasks = set()
 
     def _load(self) -> None:
@@ -222,12 +223,19 @@ class Learner:
         return self._consensus.value if self._consensus else None
 
 
+class Task(NamedTuple):
+    msg: str
+    task_fn: Callable
+    fut: asyncio.Future
+    response: bool
+
+
 class MockAcceptorComms:
     def __init__(
         self,
         acceptor: Acceptor,
         accepted_props: dict[int, Proposal],
-        task_queue: asyncio.Queue,
+        task_queue: asyncio.Queue[Task],
         failure_rate: float = 0.2,
     ) -> None:
         self.acc = acceptor
@@ -248,7 +256,7 @@ class MockAcceptorComms:
 
         msg = f"[P{proposer_id} -> A{self.acc._id}] PrepareRequest({number=})"
         fut = asyncio.get_event_loop().create_future()
-        await self.task_queue.put((msg, prepare_task, fut))
+        await self.task_queue.put(Task(msg, prepare_task, fut, False))
 
         res = await fut
         if res is None:
@@ -271,7 +279,7 @@ class MockAcceptorComms:
 
         msg = f"[P{proposer_id} -> A{self.acc._id}] AcceptRequest({prop})"
         fut = asyncio.get_event_loop().create_future()
-        await self.task_queue.put((msg, accept_task, fut))
+        await self.task_queue.put(Task(msg, accept_task, fut, False))
 
         res = await fut
         if res is None:
@@ -284,7 +292,7 @@ class MockAcceptorComms:
 
 
 class MockLearnerComms:
-    def __init__(self, learner: Learner, task_queue: asyncio.Queue) -> None:
+    def __init__(self, learner: Learner, task_queue: asyncio.Queue[Task]) -> None:
         self.learner = learner
         self.task_queue = task_queue
         self.dead = False
@@ -301,7 +309,7 @@ class MockLearnerComms:
 
         msg = f"[A{acceptor_id} -> L{self.learner.id}] AcceptedProposal({acceptor_id=} {prop=})"
         fut = asyncio.get_event_loop().create_future()
-        await self.task_queue.put((msg, send_accepted_task, fut))
+        await self.task_queue.put(Task(msg, send_accepted_task, fut, False))
 
         return await fut
 
@@ -315,24 +323,33 @@ def get_consensus(accepted_values: dict[int, Proposal], majority: int) -> Value 
     return majority_props[0].value if majority_props else None
 
 
-# TODO new task before setting future result
+def _response_wrapper(res):
+    async def respond():
+        return res
+
+    return respond
+
+
 async def consume_one_task(
-    task_queue: asyncio.Queue, messages: list[str], response: bool = True
+    task_queue: asyncio.Queue[Task], messages: list[str]
 ) -> asyncio.Task | None:
-    msg, task_fn, fut = await task_queue.get()
+    task = await task_queue.get()
 
     try:
-        messages.append(msg)
-        coro = task_fn()
-        msg, result = await coro
-        if response:
-            messages.append(msg)
-            fut.set_result(result)
+        messages.append(task.msg)
+
+        coro = task.task_fn()
+        res_msg, result = await coro
+        if task.response:
+            if res_msg:
+                messages.append(res_msg)
+            task.fut.set_result(result)
         else:
-            messages.append(f"{msg} -> DROPPED")
-            fut.set_result(None)
+            await task_queue.put(
+                Task(res_msg, _response_wrapper(("", result)), task.fut, True)
+            )
     except Exception as e:
-        fut.set_exception(e)
+        task.fut.set_exception(e)
     finally:
         task_queue.task_done()
 
@@ -352,12 +369,11 @@ async def shuffle_queue(queue: asyncio.Queue):
 class Operation(Enum):
     PROPOSE = auto()
     EXECUTE = auto()
-    EXECUTE_NO_RESPONSE = auto()
     DROP = auto()
     DUPLICATE = auto()
     SHUFFLE = auto()
     KILL_COMM = auto()
-    # TODO restart node with persistence
+    RESTART_NODE = auto()
 
 
 def node_state_message(proposers, acceptors):
@@ -371,6 +387,12 @@ def node_state_message(proposers, acceptors):
     return msg.strip()
 
 
+def restart_node(node):
+    for attr in node._persisted:
+        setattr(node, attr, None)
+    node._load()
+
+
 async def test_run(
     n_nodes: int,
     random_seed: int,
@@ -379,7 +401,7 @@ async def test_run(
 ) -> list[str] | None:
     majority = n_nodes // 2 + 1
     accepted_props: dict[int, Proposal] = {}
-    task_queue = asyncio.Queue()
+    task_queue: asyncio.Queue[Task] = asyncio.Queue()
     bg_tasks: set[asyncio.Task] = set()
     messages: list[str] = []
 
@@ -398,11 +420,10 @@ async def test_run(
 
     def _available_op(op: Operation) -> bool:
         match op:
-            case Operation.PROPOSE:
+            case Operation.PROPOSE | Operation.RESTART_NODE:
                 return True
             case (
                 Operation.EXECUTE
-                | Operation.EXECUTE_NO_RESPONSE
                 | Operation.SHUFFLE
                 | Operation.DROP
                 | Operation.DUPLICATE
@@ -415,16 +436,17 @@ async def test_run(
     consensus = None
     for i in range(n_operations):
         new_consensus = get_consensus(accepted_props, majority) or consensus
-        if consensus is None and new_consensus != consensus:
+        if new_consensus != consensus:
             msg = f"[consensus] new consensus {new_consensus}: {accepted_props}"
             messages.append(msg)
-            consensus = new_consensus
-        elif new_consensus != consensus:
+
+        if new_consensus != consensus and consensus is not None:
             msg = "[ERROR] consensus has changed"
             messages.append(msg)
             messages.append(f"SEED={random_seed}")
             return messages
 
+        consensus = new_consensus
         learner_consensus = [learner.get_value() for learner in learners]
         if any(lc is not None and lc != consensus for lc in learner_consensus):
             msg = (
@@ -436,8 +458,7 @@ async def test_run(
             messages.append(f"SEED={random_seed}")
             return messages
 
-        # XXX 0
-        weights = [0.2, 0.5, 0.1, 0.1, 0.1, 0.1, 0]
+        weights = [1, 5, 1, 1, 1, 0.01, 0.01]
         _available_ops = [
             (op, weights[i]) for i, op in enumerate(Operation) if _available_op(op)
         ]
@@ -456,25 +477,30 @@ async def test_run(
             case Operation.DROP:
                 msg, *_ = await task_queue.get()
                 messages.append(f"{msg} -> DROPPED")
-            case Operation.EXECUTE | Operation.EXECUTE_NO_RESPONSE:
+            case Operation.EXECUTE:
                 if log_state:
                     state_msg = node_state_message(proposers, acceptors)
                     messages.append(state_msg)
-                await consume_one_task(
-                    task_queue, messages, response=action == Operation.EXECUTE
-                )
+                await consume_one_task(task_queue, messages)
             case Operation.DUPLICATE:
-                msg, task_fn, fut = await task_queue.get()
-                await task_queue.put((msg, task_fn, fut))
+                task = await task_queue.get()
+                await task_queue.put(task)
                 fut_ = asyncio.get_event_loop().create_future()
-                await task_queue.put((msg, task_fn, fut_))
+                await task_queue.put(Task(task.msg, task.task_fn, fut_, task.response))
             case Operation.SHUFFLE:
                 await shuffle_queue(task_queue)
             case Operation.KILL_COMM:
                 node = random.choice(range(n_nodes))
-                for comm in [acceptor_comms[node], learner_comms[node]]:
+                msg = f"[kill comm] killing communations with node {node}"
+                messages.append(msg)
+                for comm in (acceptor_comms[node], learner_comms[node]):
                     comm.kill()
                 await shuffle_queue(task_queue)
+            case Operation.RESTART_NODE:
+                node = random.choice(range(n_nodes))
+                messages.append(f"[restart] node {node}")
+                restart_node(proposers[node])
+                restart_node(acceptors[node])
 
         await asyncio.sleep(1e-10)
 
