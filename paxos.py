@@ -146,7 +146,7 @@ class Acceptor:
         learner_comms: Sequence[LearnerCommunication],
     ) -> None:
         self.id = acceptor_id
-        self.highest_promise = 0
+        self._highest_promise = 0
         self._last_proposal: Proposal | None = None
         self._learner_comms = learner_comms
         self._persist_id = f"acc_{instance_id}_{self.id}"
@@ -174,15 +174,15 @@ class Acceptor:
         persist(self._persist_id, state)
 
     def receive_prepare(self, number: int) -> PrepareResponse:
-        if number > self.highest_promise:
-            self.highest_promise = number
+        if number > self._highest_promise:
+            self._highest_promise = number
             self._persist()
             return PrepareResponse(prepared=True, last_proposal=self._last_proposal)
 
         return PrepareResponse(prepared=False)
 
     async def receive_accept(self, prop: Proposal) -> AcceptResponse:
-        if prop.number < self.highest_promise:
+        if prop.number < self._highest_promise:
             return AcceptResponse(accepted=False)
 
         self._last_proposal = prop
@@ -240,7 +240,7 @@ class MockAcceptorComms:
                 return msg, PrepareResponse(prepared=False)
 
             res = self.acc.receive_prepare(number)
-            msg = f"[A{self.acc.id} -> P{proposer_id}] PrepareRequest({number=}) PrepareResponse({res}) | highest_promise={self.acc.highest_promise}"
+            msg = f"[A{self.acc.id} -> P{proposer_id}] PrepareRequest({number=}) PrepareResponse({res}) | highest_promise={self.acc._highest_promise}"
             return msg, res
 
         msg = f"[P{proposer_id} -> A{self.acc.id}] PrepareRequest({number=})"
@@ -264,7 +264,7 @@ class MockAcceptorComms:
                 self.accepted_props[self.acc.id] = prop
 
             msg = (
-                f"[A{self.acc.id} -> P{proposer_id}] {prop} AcceptResponse({res}) | highest_promise={self.acc.highest_promise}\n"
+                f"[A{self.acc.id} -> P{proposer_id}] {prop} AcceptResponse({res}) | highest_promise={self.acc._highest_promise}\n"
                 f"[accepted proposals] {self.accepted_props}"
             )
             return msg, res
