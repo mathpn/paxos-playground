@@ -73,12 +73,12 @@ class Proposer:
         n_proposers: int,
         acceptor_comms: Sequence[AcceptorCommunication],
     ) -> None:
-        self.id = proposer_id
+        self._id = proposer_id
         self._n = -1
         self._n_proposers = n_proposers
         self._acceptor_comms = acceptor_comms
         self._majority = len(acceptor_comms) // 2 + 1
-        self._persist_id = f"prop_{instance_id}_{self.id}"
+        self._persist_id = f"prop_{instance_id}_{self._id}"
         self._load()
 
     def _load(self) -> None:
@@ -95,7 +95,7 @@ class Proposer:
         self._persist()
 
     def _proposal_number(self) -> int:
-        return self.id + self._n * self._n_proposers
+        return self._id + self._n * self._n_proposers
 
     async def propose(self, value: Value) -> tuple[bool, Value | None]:
         self._increment()
@@ -112,7 +112,7 @@ class Proposer:
 
     async def _prepare(self, number: int) -> tuple[bool, Proposal | None]:
         responses = await asyncio.gather(
-            *[comm.prepare(self.id, number) for comm in self._acceptor_comms]
+            *[comm.prepare(self._id, number) for comm in self._acceptor_comms]
         )
         prepared_res = [r for r in responses if r.prepared]
 
@@ -130,7 +130,7 @@ class Proposer:
 
     async def _request_acceptance(self, prop: Proposal) -> bool:
         responses = await asyncio.gather(
-            *[comm.accept(self.id, prop) for comm in self._acceptor_comms]
+            *[comm.accept(self._id, prop) for comm in self._acceptor_comms]
         )
         accepted = [r for r in responses if r.accepted]
         return len(accepted) >= self._majority
@@ -145,11 +145,11 @@ class Acceptor:
         acceptor_id: int,
         learner_comms: Sequence[LearnerCommunication],
     ) -> None:
-        self.id = acceptor_id
+        self._id = acceptor_id
         self._highest_promise = 0
         self._last_proposal: Proposal | None = None
         self._learner_comms = learner_comms
-        self._persist_id = f"acc_{instance_id}_{self.id}"
+        self._persist_id = f"acc_{instance_id}_{self._id}"
         self._load()
         self._tasks = set()
 
@@ -189,7 +189,7 @@ class Acceptor:
         self._persist()
 
         for comm in self._learner_comms:
-            task = asyncio.create_task(comm.send_accepted(self.id, prop.value))
+            task = asyncio.create_task(comm.send_accepted(self._id, prop.value))
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
 
@@ -236,14 +236,14 @@ class MockAcceptorComms:
     async def prepare(self, proposer_id: int, number: int) -> PrepareResponse:
         async def prepare_task():
             if self.dead:
-                msg = f"[A{self.acc.id} -> P{proposer_id}] dead comm"
+                msg = f"[A{self.acc._id} -> P{proposer_id}] dead comm"
                 return msg, PrepareResponse(prepared=False)
 
             res = self.acc.receive_prepare(number)
-            msg = f"[A{self.acc.id} -> P{proposer_id}] PrepareRequest({number=}) PrepareResponse({res}) | highest_promise={self.acc._highest_promise}"
+            msg = f"[A{self.acc._id} -> P{proposer_id}] PrepareRequest({number=}) PrepareResponse({res})"
             return msg, res
 
-        msg = f"[P{proposer_id} -> A{self.acc.id}] PrepareRequest({number=})"
+        msg = f"[P{proposer_id} -> A{self.acc._id}] PrepareRequest({number=})"
         fut = asyncio.get_event_loop().create_future()
         await self.task_queue.put((msg, prepare_task, fut))
 
@@ -256,20 +256,17 @@ class MockAcceptorComms:
     async def accept(self, proposer_id: int, prop: Proposal) -> AcceptResponse:
         async def accept_task():
             if self.dead:
-                msg = f"[A{self.acc.id} -> P{proposer_id}] dead comm"
+                msg = f"[A{self.acc._id} -> P{proposer_id}] dead comm"
                 return msg, AcceptResponse(accepted=False)
 
             res = await self.acc.receive_accept(prop)
             if res.accepted:
-                self.accepted_props[self.acc.id] = prop
+                self.accepted_props[self.acc._id] = prop
 
-            msg = (
-                f"[A{self.acc.id} -> P{proposer_id}] {prop} AcceptResponse({res}) | highest_promise={self.acc._highest_promise}\n"
-                f"[accepted proposals] {self.accepted_props}"
-            )
+            msg = f"[A{self.acc._id} -> P{proposer_id}] {prop} AcceptResponse({res})"
             return msg, res
 
-        msg = f"[P{proposer_id} -> A{self.acc.id}] AcceptRequest({prop})"
+        msg = f"[P{proposer_id} -> A{self.acc._id}] AcceptRequest({prop})"
         fut = asyncio.get_event_loop().create_future()
         await self.task_queue.put((msg, accept_task, fut))
 
@@ -360,8 +357,22 @@ class Operation(Enum):
     # TODO restart node with persistence
 
 
+def node_state_message(proposers, acceptors):
+    msg = ""
+    for prop in proposers:
+        state = {k: v for k, v in prop.__dict__.items() if k in prop._persisted}
+        msg += f"-> P{prop._id} state: {state}\n"
+    for acc in acceptors:
+        state = {k: v for k, v in acc.__dict__.items() if k in acc._persisted}
+        msg += f"-> A{acc._id} state: {state}\n"
+    return msg.strip()
+
+
 async def test_run(
-    n_nodes: int, random_seed: int, n_operations: int = 1_000
+    n_nodes: int,
+    random_seed: int,
+    n_operations: int = 1_000,
+    log_state: bool = False,
 ) -> list[str] | None:
     majority = n_nodes // 2 + 1
     accepted_props: dict[int, Proposal] = {}
@@ -444,10 +455,13 @@ async def test_run(
             case Operation.DROP:
                 msg, *_ = await task_queue.get()
                 messages.append(f"{msg} -> DROPPED")
-            case Operation.EXECUTE:
-                await consume_one_task(task_queue, messages)
-            case Operation.EXECUTE_NO_RESPONSE:
-                await consume_one_task(task_queue, messages, response=False)
+            case Operation.EXECUTE | Operation.EXECUTE_NO_RESPONSE:
+                if log_state:
+                    state_msg = node_state_message(proposers, acceptors)
+                    messages.append(state_msg)
+                await consume_one_task(
+                    task_queue, messages, response=action == Operation.EXECUTE
+                )
             case Operation.DUPLICATE:
                 msg, task_fn, fut = await task_queue.get()
                 await task_queue.put((msg, task_fn, fut))
@@ -477,17 +491,20 @@ async def main():
     parser.add_argument("--n-nodes", type=int, default=3)
     parser.add_argument("--n-simulations", type=int, default=10_000)
     parser.add_argument("--n-operations", type=int, default=1_000)
+    parser.add_argument("--log-state", action="store_true")
     parser.add_argument("--cpu", type=int, default=(os.cpu_count() or 2) - 1)
     args = parser.parse_args()
 
     if args.seed:
-        messages = await test_run(args.n_nodes, args.seed)
+        messages = await test_run(args.n_nodes, args.seed, log_state=args.log_state)
         if messages:
             print("\n".join(messages))
         return
 
     seeds = random.sample(range(1_000_000), args.n_simulations)
-    args_list = [(args.n_nodes, seed, args.n_operations) for seed in seeds]
+    args_list = [
+        (args.n_nodes, seed, args.n_operations, args.log_state) for seed in seeds
+    ]
     with multiprocessing.Pool(args.cpu) as p:
         all_messages = p.map(wrapper_func, args_list)
 
