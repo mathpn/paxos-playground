@@ -20,6 +20,9 @@ class Proposal:
     number: int
     value: Value
 
+    def __hash__(self) -> int:
+        return hash((self.number, self.value))
+
 
 @dataclass
 class PrepareResponse:
@@ -39,7 +42,7 @@ class AcceptorCommunication(Protocol):
 
 
 class LearnerCommunication(Protocol):
-    async def send_accepted(self, acceptor_id: int, value: Value) -> None: ...
+    async def send_accepted(self, acceptor_id: int, prop: Proposal) -> None: ...
 
 
 def persist(id_: str, d: dict[str, Any]):
@@ -189,7 +192,7 @@ class Acceptor:
         self._persist()
 
         for comm in self._learner_comms:
-            task = asyncio.create_task(comm.send_accepted(self._id, prop.value))
+            task = asyncio.create_task(comm.send_accepted(self._id, prop))
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
 
@@ -199,24 +202,24 @@ class Acceptor:
 class Learner:
     def __init__(self, learner_id: int, n_acceptors: int) -> None:
         self.id = learner_id
-        self._accepted: defaultdict[Value, set[int]] = defaultdict(set)
+        self._accepted: defaultdict[Proposal, set[int]] = defaultdict(set)
+        self._consensus: Proposal | None = None
         self._n_acceptors = n_acceptors
         self._majority = n_acceptors // 2 + 1
 
-    def receive_accepted(self, acceptor_id: int, value: Value) -> None:
-        self._accepted[value].add(acceptor_id)
+    def receive_accepted(self, acceptor_id: int, prop: Proposal) -> None:
+        self._accepted[prop].add(acceptor_id)
+        self._find_consensus()
 
-    def get_value(self) -> Value | None:
-        if not self._accepted:
-            return None
-
+    def _find_consensus(self) -> None:
         items = ((k, len(v)) for k, v in self._accepted.items())
         sorted_items = list(sorted(items, key=lambda item: item[1], reverse=True))
-        value, count = sorted_items[0]
+        prop, count = sorted_items[0]
         if count >= self._majority:
-            return value
+            self._consensus = prop
 
-        return None
+    def get_value(self) -> Value | None:
+        return self._consensus.value if self._consensus else None
 
 
 class MockAcceptorComms:
@@ -286,17 +289,17 @@ class MockLearnerComms:
         self.task_queue = task_queue
         self.dead = False
 
-    async def send_accepted(self, acceptor_id: int, value: Value):
+    async def send_accepted(self, acceptor_id: int, prop: Proposal):
         async def send_accepted_task():
             if self.dead:
                 msg = f"[A{acceptor_id} -> L{self.learner.id}] dead comm"
                 return msg, None
 
-            msg = f"[A{acceptor_id} -> L{self.learner.id}] ack AcceptevValue({acceptor_id=} {value=})"
-            self.learner.receive_accepted(acceptor_id, value)
+            msg = f"[A{acceptor_id} -> L{self.learner.id}] ack AcceptedProposal({acceptor_id=} {prop=})"
+            self.learner.receive_accepted(acceptor_id, prop)
             return msg, None
 
-        msg = f"[A{acceptor_id} -> L{self.learner.id}] AcceptedValue({acceptor_id=} {value=})"
+        msg = f"[A{acceptor_id} -> L{self.learner.id}] AcceptedProposal({acceptor_id=} {prop=})"
         fut = asyncio.get_event_loop().create_future()
         await self.task_queue.put((msg, send_accepted_task, fut))
 
@@ -307,9 +310,9 @@ class MockLearnerComms:
 
 
 def get_consensus(accepted_values: dict[int, Proposal], majority: int) -> Value | None:
-    counts = Counter(v.value for v in accepted_values.values())
-    majority_values = [k for k, v in counts.items() if v >= majority]
-    return majority_values[0] if majority_values else None
+    counts = Counter(accepted_values.values())
+    majority_props = [k for k, v in counts.items() if v >= majority]
+    return majority_props[0].value if majority_props else None
 
 
 # TODO new task before setting future result
@@ -411,13 +414,19 @@ async def test_run(
     random.seed(random_seed)
     consensus = None
     for i in range(n_operations):
-        new_consensus = get_consensus(accepted_props, majority)
-        if new_consensus != consensus:
+        new_consensus = get_consensus(accepted_props, majority) or consensus
+        if consensus is None and new_consensus != consensus:
             msg = f"[consensus] new consensus {new_consensus}: {accepted_props}"
             messages.append(msg)
+            consensus = new_consensus
+        elif new_consensus != consensus:
+            msg = "[ERROR] consensus has changed"
+            messages.append(msg)
+            messages.append(f"SEED={random_seed}")
+            return messages
 
         learner_consensus = [learner.get_value() for learner in learners]
-        if any(lc is not None and lc != new_consensus for lc in learner_consensus):
+        if any(lc is not None and lc != consensus for lc in learner_consensus):
             msg = (
                 "[ERROR] learners consensus differ from true consensus: "
                 f"{learner_consensus = } "
@@ -426,14 +435,6 @@ async def test_run(
             messages.append(msg)
             messages.append(f"SEED={random_seed}")
             return messages
-
-        if consensus is not None and consensus != new_consensus:
-            msg = "[ERROR] consensus has changed"
-            messages.append(msg)
-            messages.append(f"SEED={random_seed}")
-            return messages
-
-        consensus = new_consensus
 
         # XXX 0
         weights = [0.2, 0.5, 0.1, 0.1, 0.1, 0.1, 0]
