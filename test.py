@@ -12,6 +12,7 @@ from paxos import (
     Acceptor,
     AcceptResponse,
     Learner,
+    NodeId,
     PrepareResponse,
     Proposal,
     Proposer,
@@ -30,7 +31,7 @@ class MockAcceptorComms:
     def __init__(
         self,
         acceptor: Acceptor,
-        accepted_props: dict[int, Proposal],
+        accepted_props: dict[NodeId, Proposal],
         task_queue: asyncio.Queue[Task],
         failure_rate: float = 0.2,
     ) -> None:
@@ -40,7 +41,7 @@ class MockAcceptorComms:
         self.task_queue = task_queue
         self.dead = False
 
-    async def prepare(self, proposer_id: int, number: int) -> PrepareResponse:
+    async def prepare(self, proposer_id: NodeId, number: int) -> PrepareResponse:
         async def prepare_task():
             if self.dead:
                 msg = f"[A{self.acc._id} -> P{proposer_id}] dead comm"
@@ -60,7 +61,7 @@ class MockAcceptorComms:
 
         return res
 
-    async def accept(self, proposer_id: int, prop: Proposal) -> AcceptResponse:
+    async def accept(self, proposer_id: NodeId, prop: Proposal) -> AcceptResponse:
         async def accept_task():
             if self.dead:
                 msg = f"[A{self.acc._id} -> P{proposer_id}] dead comm"
@@ -93,7 +94,7 @@ class MockLearnerComms:
         self.task_queue = task_queue
         self.dead = False
 
-    async def send_accepted(self, acceptor_id: int, prop: Proposal):
+    async def send_accepted(self, acceptor_id: NodeId, prop: Proposal):
         async def send_accepted_task():
             if self.dead:
                 msg = f"[A{acceptor_id} -> L{self.learner.id}] dead comm"
@@ -113,7 +114,9 @@ class MockLearnerComms:
         self.dead = True
 
 
-def get_consensus(accepted_values: dict[int, Proposal], majority: int) -> Value | None:
+def get_consensus(
+    accepted_values: dict[NodeId, Proposal], majority: int
+) -> Value | None:
     counts = Counter(accepted_values.values())
     majority_props = [k for k, v in counts.items() if v >= majority]
     return majority_props[0].value if majority_props else None
@@ -196,7 +199,7 @@ async def test_run(
     log_state: bool = False,
 ) -> list[str] | None:
     majority = n_nodes // 2 + 1
-    accepted_props: dict[int, Proposal] = {}
+    accepted_props: dict[NodeId, Proposal] = {}
     task_queue: asyncio.Queue[Task] = asyncio.Queue()
     bg_tasks: set[asyncio.Task] = set()
     messages: list[str] = []
@@ -205,13 +208,21 @@ async def test_run(
     learners = [Learner(i, n_nodes) for i in range(n_nodes)]
     learner_comms = [MockLearnerComms(learner, task_queue) for learner in learners]
     acceptors = [
-        Acceptor(instance_id, i, learner_comms=learner_comms) for i in range(n_nodes)
+        Acceptor(instance_id=instance_id, acceptor_id=i, learner_comms=learner_comms)
+        for i in range(n_nodes)
     ]
     acceptor_comms = [
         MockAcceptorComms(acc, accepted_props, task_queue) for acc in acceptors
     ]
     proposers = [
-        Proposer(instance_id, i, n_nodes, acceptor_comms) for i in range(n_nodes)
+        Proposer(
+            instance_id=instance_id,
+            proposer_id=i,
+            n_proposers=n_nodes,
+            n_acceptors=n_nodes,
+            acceptor_comms=acceptor_comms,
+        )
+        for i in range(n_nodes)
     ]
 
     def _available_op(op: Operation) -> bool:

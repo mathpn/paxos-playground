@@ -7,7 +7,8 @@ from typing import Any, Protocol, Sequence
 
 PERSIST_DIR = "/tmp/paxos-persist"
 
-Value = str
+type NodeId = int
+type Value = str
 
 
 @dataclass
@@ -31,13 +32,13 @@ class AcceptResponse:
 
 
 class AcceptorCommunication(Protocol):
-    async def prepare(self, proposer_id: int, number: int) -> PrepareResponse: ...
+    async def prepare(self, proposer_id: NodeId, number: int) -> PrepareResponse: ...
 
-    async def accept(self, proposer_id: int, prop: Proposal) -> AcceptResponse: ...
+    async def accept(self, proposer_id: NodeId, prop: Proposal) -> AcceptResponse: ...
 
 
 class LearnerCommunication(Protocol):
-    async def send_accepted(self, acceptor_id: int, prop: Proposal) -> None: ...
+    async def send_accepted(self, acceptor_id: NodeId, prop: Proposal) -> None: ...
 
 
 def persist(id_: str, d: dict[str, Any]):
@@ -66,15 +67,16 @@ class Proposer:
     def __init__(
         self,
         instance_id: str,
-        proposer_id: int,
+        proposer_id: NodeId,
         n_proposers: int,
+        n_acceptors: int,
         acceptor_comms: Sequence[AcceptorCommunication],
     ) -> None:
         self._id = proposer_id
         self._n = -1
         self._n_proposers = n_proposers
         self._acceptor_comms = acceptor_comms
-        self._majority = len(acceptor_comms) // 2 + 1
+        self._majority = n_acceptors // 2 + 1
         self._persist_id = f"prop_{instance_id}_{self._id}"
         self._load()
         self._persist()
@@ -140,7 +142,7 @@ class Acceptor:
     def __init__(
         self,
         instance_id: str,
-        acceptor_id: int,
+        acceptor_id: NodeId,
         learner_comms: Sequence[LearnerCommunication],
     ) -> None:
         self._id = acceptor_id
@@ -196,14 +198,14 @@ class Acceptor:
 
 
 class Learner:
-    def __init__(self, learner_id: int, n_acceptors: int) -> None:
+    def __init__(self, learner_id: NodeId, n_acceptors: int) -> None:
         self.id = learner_id
-        self._accepted: defaultdict[Proposal, set[int]] = defaultdict(set)
+        self._accepted: defaultdict[Proposal, set[NodeId]] = defaultdict(set)
         self._consensus: Proposal | None = None
         self._n_acceptors = n_acceptors
         self._majority = n_acceptors // 2 + 1
 
-    def receive_accepted(self, acceptor_id: int, prop: Proposal) -> None:
+    def receive_accepted(self, acceptor_id: NodeId, prop: Proposal) -> None:
         self._accepted[prop].add(acceptor_id)
         self._find_consensus()
 
