@@ -302,7 +302,6 @@ async def test_run(
                 messages.append(msg)
                 for comm in (acceptor_comms[node], learner_comms[node]):
                     comm.kill()
-                await shuffle_queue(task_queue)
             case Operation.RESTART_NODE:
                 node = random.choice(range(n_nodes))
                 messages.append(f"[restart] node {node}")
