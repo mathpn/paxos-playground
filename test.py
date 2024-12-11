@@ -67,7 +67,7 @@ class MockAcceptorComms:
                 msg = f"[A{self.acc._id} -> P{proposer_id}] dead comm"
                 return msg, AcceptResponse(accepted=False)
 
-            res = await self.acc.receive_accept(prop)
+            res = self.acc.receive_accept(prop)
             if res.accepted:
                 self.accepted_props[self.acc._id] = prop
 

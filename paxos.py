@@ -182,7 +182,7 @@ class Acceptor:
 
         return PrepareResponse(prepared=False)
 
-    async def receive_accept(self, prop: Proposal) -> AcceptResponse:
+    def receive_accept(self, prop: Proposal) -> AcceptResponse:
         if prop.number < self._highest_promise:
             return AcceptResponse(accepted=False)
 
